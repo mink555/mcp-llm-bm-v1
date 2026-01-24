@@ -81,28 +81,47 @@ def singlecall_eval_options(f):
 
 
 def get_file_paths(test_prefix, model_name, tools_type=None):
-    output_path = f'{REPO_PATH}/output/'
-    utils.create_directory(output_path)
+    # 새로운 디렉토리 구조: result/, score/ 사용 (프로젝트 루트에 생성)
+    # REPO_PATH는 FunctionChat-Bench 디렉토리이므로 상위 디렉토리로 이동
+    project_root = os.path.dirname(os.path.abspath(REPO_PATH))
+    result_path = os.path.join(project_root, 'result')
+    score_path = os.path.join(project_root, 'score')
+    utils.create_directory(result_path)
+    utils.create_directory(score_path)
     
-    # 모델별 디렉토리 생성
-    model_output_path = f'{output_path}/{model_name}'
-    utils.create_directory(model_output_path)
-    print(f"output_path: {model_output_path}")
+    # 모델 이름을 디렉토리 경로로 변환 (슬래시를 디렉토리 구분자로 사용)
+    # 예: "mistralai/mistral-small-3.2-24b-instruct" -> "mistralai/mistral-small-3.2-24b-instruct"
+    if "/" in model_name:
+        org_name, model_name_only = model_name.split("/", 1)
+        model_result_dir = os.path.join(result_path, org_name, model_name_only)
+        model_score_dir = os.path.join(score_path, org_name, model_name_only)
+    else:
+        model_result_dir = os.path.join(result_path, model_name)
+        model_score_dir = os.path.join(score_path, model_name)
     
-    base_path = f'{model_output_path}/{test_prefix}'
+    utils.create_directory(model_result_dir)
+    utils.create_directory(model_score_dir)
+    print(f"result_path: {model_result_dir}")
+    print(f"score_path: {model_score_dir}")
+    
+    # 파일명용 모델 이름 (슬래시와 하이픈을 언더스코어로 변환)
+    model_name_clean = model_name.replace("/", "_").replace("-", "_")
+    
+    base_path = os.path.join(model_result_dir, test_prefix)
+    score_base_path = os.path.join(model_score_dir, test_prefix)
     if tools_type:
         return {
             "request": f"{base_path}.input.jsonl",
-            "predict": f"{base_path}.{model_name}.{tools_type}.output.jsonl",
-            "eval": f"{base_path}.{model_name}.{tools_type}.eval.jsonl",
-            "eval_log": f"{base_path}.{model_name}.{tools_type}.eval_report.tsv",
+            "predict": f"{base_path}.{model_name_clean}.{tools_type}.output.jsonl",
+            "eval": f"{score_base_path}.{model_name_clean}.{tools_type}.eval.jsonl",
+            "eval_log": f"{score_base_path}.{model_name_clean}.{tools_type}.eval_report.tsv",
         }
     else:
         return {
             "request": f"{base_path}.input.jsonl",
-            "predict": f"{base_path}.{model_name}.output.jsonl",
-            "eval": f"{base_path}.{model_name}.eval.jsonl",
-            "eval_log": f"{base_path}.{model_name}.eval_report.tsv",
+            "predict": f"{base_path}.{model_name_clean}.output.jsonl",
+            "eval": f"{score_base_path}.{model_name_clean}.eval.jsonl",
+            "eval_log": f"{score_base_path}.{model_name_clean}.eval_report.tsv",
         }
 
 

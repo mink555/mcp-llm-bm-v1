@@ -1,11 +1,15 @@
 import json
 import time
 import concurrent
+import warnings
 from tqdm import tqdm
 import threading
 
 from src import utils
 from src.api_executor import APIExecutorFactory
+
+# multiprocessing 리소스 경고 억제 (Python 3.12에서 ThreadPoolExecutor 사용 시 발생하는 무해한 경고)
+warnings.filterwarnings('ignore', category=UserWarning, module='multiprocessing.resource_tracker')
 
 
 class ResponseHandler:
@@ -66,12 +70,15 @@ class ResponseHandler:
             list: A list of all responses fetched and saved.
         """
         outputs = []
-        try:
-            models = self.executor.models()
-            print(models)
-        except Exception as e:
-            print(f"Error fetching models: {e}")
-            raise e
+        # models() 호출은 선택사항이므로 실패해도 계속 진행
+        # 빠른 실행을 위해 debug 모드에서만 모델 리스트 조회
+        if debug:
+            try:
+                if hasattr(self.executor, 'models'):
+                    models = self.executor.models()
+                    print(f"Available models: {models}")
+            except Exception as e:
+                print(f"⚠️ 모델 리스트 조회 실패 (계속 진행): {e}")
 
         # 1. check existing responses
         if not reset:
@@ -96,20 +103,25 @@ class ResponseHandler:
                 response_output = None
                 try:
                     # 3번 재시도
-                    for _ in range(3):
+                    for retry in range(3):
                         try:
-                            response_output = future.result(timeout=30)
+                            response_output = future.result(timeout=60)
                             break
                         except Exception as e:
-                            print(f"Error processing request at index {idx}: {e}")
-                            time.sleep(1)
+                            error_type = type(e).__name__
+                            error_msg = str(e)
+                            print(f"❌ API 호출 실패 (재시도 {retry + 1}/3) - 인덱스 {idx}: {error_type}: {error_msg[:300]}")
+                            if retry < 2:
+                                time.sleep(2)
                     
                     if response_output is None:
-                        response_output = {"role": "assistant", "content": "", "tool_calls": [], "error": f"api response is None"}
+                        response_output = {"role": "assistant", "content": "", "tool_calls": [], "error": f"api response is None after 3 retries"}
                     outputs[idx] = response_output
                 except Exception as e:
-                    print(f"Error processing request at index {idx}: {e}")
-                    response_output = {"role": "assistant", "content": "", "tool_calls": [], "error": str(e)}
+                    error_type = type(e).__name__
+                    error_msg = str(e)
+                    print(f"❌ 최종 실패 - 인덱스 {idx}: {error_type}: {error_msg[:300]}")
+                    response_output = {"role": "assistant", "content": "", "tool_calls": [], "error": f"{error_type}: {error_msg[:200]}"}
                     outputs[idx] = response_output
         end_time = time.time()
         elapsed_time = end_time - start_time

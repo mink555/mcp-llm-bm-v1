@@ -7,10 +7,11 @@ from typing import Optional, Union
 
 from src import utils
 from src import openai_utils
-from src.api_executor import (
-    OpenaiModelAzureAPI,
-    OpenaiModelAPI
-)
+# api_executor는 필요할 때만 import (SIGSEGV 방지)
+# from src.api_executor import (
+#     OpenaiModelAzureAPI,
+#     OpenaiModelAPI
+# )
 from src.formatter import (
     CommonResponseFormatter,
     DialogResponseFormatter,
@@ -69,9 +70,13 @@ class EvaluationHandler:
         self.openai_apikey = cfg['api_key']
         self.max_tokens = cfg['max_tokens']
         self.eval_reg = EVAlUATION_REGISTOR_OBJ[self.evaluation_type]()
-        self.meta_log_file = f"{REPO_PATH}/output/.batch_meta_{self.evaluation_type}.jsonl"
-        self.batch_file = f"{REPO_PATH}/output/.batch_{self.evaluation_type}.jsonl"
-        self.batch_output_file = f"{REPO_PATH}/output/.batch_{self.evaluation_type}_result.jsonl"
+        # 새로운 디렉토리 구조: score/ 사용
+        # 프로젝트 루트의 score/ 디렉토리 사용
+        project_root = os.path.dirname(REPO_PATH)
+        score_dir = os.path.join(project_root, 'score')
+        self.meta_log_file = os.path.join(score_dir, f".batch_meta_{self.evaluation_type}.jsonl")
+        self.batch_file = os.path.join(score_dir, f".batch_{self.evaluation_type}.jsonl")
+        self.batch_output_file = os.path.join(score_dir, f".batch_{self.evaluation_type}_result.jsonl")
 
     def get_rubric_prompts(self) -> dict:
         rubric_prompts = {}
@@ -85,12 +90,15 @@ class EvaluationHandler:
                     logging.warning(f"Error reading {rubric_file_path}: {e}")
         return rubric_prompts
 
-    def load_api_executor(self, cfg: dict) -> Union[OpenaiModelAzureAPI, OpenaiModelAPI]:
+    def load_api_executor(self, cfg: dict):
+        # 지연 import (SIGSEGV 방지)
+        from src.api_executor import OpenaiModelAzureAPI, OpenaiModelAPI
+        
         api_type = cfg.get('api_type', None)
         
         if api_type == "azure":
             return OpenaiModelAzureAPI(
-                instance=cfg.get('instance'),
+                model=cfg.get('api_version', cfg.get('instance')),
                 api_key=cfg.get('api_key'),
                 api_base=cfg.get('api_base'),
                 api_version=cfg.get('api_version')
@@ -98,8 +106,7 @@ class EvaluationHandler:
         elif api_type == "openai":
             return OpenaiModelAPI(
                 model=cfg.get('api_version'),
-                api_key=cfg.get('api_key'),
-                use_eval=True
+                api_key=cfg.get('api_key')
             )
         else:
             raise ValueError(f"Unsupported evaluation API type: {api_type}")
@@ -168,9 +175,11 @@ class EvaluationHandler:
             return val1 == val2
     
         try:
+            if g_func_args is None or p_func_args is None:
+                return False
             j_g_func_args = json.loads(g_func_args)
             j_p_func_args = json.loads(p_func_args)
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, TypeError) as e:
             logging.error(f"Failed to parse JSON: {e}")
             return False
 
@@ -380,6 +389,8 @@ class EvaluationHandler:
 
     def _create_batch_file(self, batch_file, outputs):
         input_prompts = []
+        # Ensure the directory for batch_file exists
+        os.makedirs(os.path.dirname(batch_file), exist_ok=True)
         with open(batch_file, 'w') as fp:
             for idx, (is_pass, response_formatter) in enumerate(tqdm(outputs, desc="Processing make batch file")):
                 inp = response_formatter.request_model
@@ -421,9 +432,19 @@ class EvaluationHandler:
         return outputs
 
     def _save_evaluation_result(self, model_name, llm_judge_name, model_path, eval_subtype):
-        eval_score_path = f"{REPO_PATH}/output/{model_name}/FunctionChat-{model_name}.eval_score.json"
-        if not os.path.isdir(f"{REPO_PATH}/output/{model_name}"):
-            os.makedirs(f"{REPO_PATH}/output/{model_name}")
+        # 새로운 디렉토리 구조: score/ 사용 (프로젝트 루트)
+        project_root = os.path.dirname(REPO_PATH)
+        score_dir = os.path.join(project_root, 'score')
+        
+        # 모델 그룹 디렉토리 (예: mistralai)
+        model_group_dir = model_name.split('/')[0].replace("-", "_")
+        model_name_clean = model_name.replace("/", "_").replace("-", "_")
+        
+        model_score_dir = os.path.join(score_dir, model_group_dir, model_name_clean)
+        utils.create_directory(model_score_dir)
+        
+        eval_score_path = os.path.join(model_score_dir, f"FunctionChat-{model_name_clean}.eval_score.json")
+        
         singlecall_score = {}
         dialog_score = {}
         calldecision_score = {}
@@ -478,14 +499,21 @@ class EvaluationHandler:
         Parameters:
             model_name (str, optional): include model name in file name.
         """
+        # 프로젝트 루트의 score/ 디렉토리 사용
+        project_root = os.path.dirname(REPO_PATH)
+        score_dir = os.path.join(project_root, 'score')
+        utils.create_directory(score_dir)
+
         if model_name:
-            self.meta_log_file = f"{REPO_PATH}/output/.batch_meta_{self.evaluation_type}_{model_name}.jsonl"
-            self.batch_file = f"{REPO_PATH}/output/.batch_{self.evaluation_type}_{model_name}.jsonl"
-            self.batch_output_file = f"{REPO_PATH}/output/.batch_{self.evaluation_type}_{model_name}_result.jsonl"
+            # 모델 이름에서 슬래시와 하이픈 등을 제거하여 안전한 파일명 생성
+            model_name_clean = model_name.replace("/", "_").replace("-", "_")
+            self.meta_log_file = os.path.join(score_dir, f".batch_meta_{self.evaluation_type}_{model_name_clean}.jsonl")
+            self.batch_file = os.path.join(score_dir, f".batch_{self.evaluation_type}_{model_name_clean}.jsonl")
+            self.batch_output_file = os.path.join(score_dir, f".batch_{self.evaluation_type}_{model_name_clean}_result.jsonl")
         else:
-            self.meta_log_file = f"{REPO_PATH}/output/.batch_meta_{self.evaluation_type}.jsonl"
-            self.batch_file = f"{REPO_PATH}/output/.batch_{self.evaluation_type}.jsonl"
-            self.batch_output_file = f"{REPO_PATH}/output/.batch_{self.evaluation_type}_result.jsonl"
+            self.meta_log_file = os.path.join(score_dir, f".batch_meta_{self.evaluation_type}.jsonl")
+            self.batch_file = os.path.join(score_dir, f".batch_{self.evaluation_type}.jsonl")
+            self.batch_output_file = os.path.join(score_dir, f".batch_{self.evaluation_type}_result.jsonl")
 
     def evaluate(self, input_set, output_set, eval_file_path, eval_log_file_path, reset, sample,
                  debug=False, only_exact=False, model_name=None, llm_judge_name=None, model_path=None, is_batch=False,

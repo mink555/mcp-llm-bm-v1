@@ -5,21 +5,7 @@ import logging
 import traceback
 import time
 
-from mistralai.client import MistralClient
-from mistralai.exceptions import MistralAPIException
-
-import vertexai
-
-from src.gemini_utils import (
-    convert_messages_gemini,
-    convert_tools_gemini,
-    convert_gemini_to_response,
-    call_gemini_model
-)
-
 from src.utils import convert_tools_alphachat
-
-import qwen_agent
 
 logger = logging.getLogger(__name__)
 
@@ -41,125 +27,108 @@ class AbstractModelAPIExecutor:
     def predict(self):
         raise NotImplementedError("Subclasses must implement this method.")
     
+    def _sanitize_messages(self, messages, for_mistral=False):
+        """
+        Sanitizes messages by replacing invalid tool call IDs (like 'random_id')
+        with valid alphanumeric IDs to satisfy API requirements.
+        
+        Args:
+            messages: List of message dictionaries
+            for_mistral: If True, generates Mistral-compatible 9-char alphanumeric IDs
+        """
+        if not messages:
+            return messages
+            
+        sanitized = []
+        
+        # Mistral은 정확히 9자리 영숫자 ID 필요 (a-z, A-Z, 0-9)
+        if for_mistral:
+            import random
+            import string
+            valid_id = ''.join(random.choices(string.ascii_letters + string.digits, k=9))
+        else:
+            # 일반적인 경우 (call_ prefix 포함 가능)
+            valid_id = "call_abc123"
+        
+        for msg in messages:
+            new_msg = msg.copy()
+            if 'tool_calls' in new_msg and new_msg['tool_calls']:
+                new_tool_calls = []
+                for tc in new_msg['tool_calls']:
+                    new_tc = tc.copy()
+                    if new_tc.get('id') == 'random_id':
+                        new_tc['id'] = valid_id
+                    new_tool_calls.append(new_tc)
+                new_msg['tool_calls'] = new_tool_calls
+            
+            if new_msg.get('role') == 'tool' and new_msg.get('tool_call_id') == 'random_id':
+                new_msg['tool_call_id'] = valid_id
+                
+            sanitized.append(new_msg)
+        return sanitized
+
     def _call_with_retry(self, func, *args, **kwargs):
-        max_retries = kwargs.get('max_retries', 3)
+        max_retries = kwargs.pop('max_retries', 3)
         for attempt in range(max_retries):
             try:
                 response = func(*args, **kwargs)
                 response = response.model_dump()
                 return response
             except Exception as e:
-                logger.warning(f"API 호출 실패 (시도 {attempt+1}/{max_retries}): {e}")
-                if attempt == max_retries - 1:
-                    logger.error("최대 재시도 횟수 초과, 예외 발생")
-                    print(json.dumps(kwargs, ensure_ascii=False, indent=2))
-                    raise
-            time.sleep(0.1)
+                error_msg = str(e)
+                error_type = type(e).__name__
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    logger.warning(f"API call failed ({error_type}): {error_msg[:200]}")
+                    logger.warning(f"Retrying in {wait_time} seconds... (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"API call failed after {max_retries} attempts: {error_type}: {error_msg}")
+                    raise e
 
     def _parse_response(self, response):
-        if isinstance(response, dict) and 'choices' in response:
-            return response['choices'][0]['message']
-        return response
+        """
+        Parses the API response and extracts relevant information.
+        Returns a dictionary that includes both simplified fields and 
+        the original OpenAI-style structure for compatibility.
+        """
+        if not response or not response.get('choices'):
+            return {"content": None, "role": "assistant", "tool_calls": None, "choices": []}
+
+        choice = response['choices'][0]
+        message = choice['message']
+        
+        # 원본 구조 유지 (formatter.py 등에서 사용)
+        parsed = response.copy()
+        
+        # 편리한 접근을 위한 필드 추가
+        parsed.update({
+            "content": message.get("content"),
+            "role": message.get("role", "assistant"),
+            "tool_calls": message.get("tool_calls"),
+            "function_call": message.get("function_call"),
+            "tool_call_id": None,
+            "name": None
+        })
+        return parsed
+
+    def models(self):
+        """모델 리스트 조회 (기본 구현)"""
+        return []
+
 
 class OpenaiModelAzureAPI(AbstractModelAPIExecutor):
-    def __init__(self, model, api_key, api_base, api_version):
-        """
-        Initialize the OpenaiModelAzureAPI class.
-
-        Parameters:
-        model (str): The name of the model to use.
-        api_key (str): The API key for authenticating with Azure OpenAI.
-        api_base (str): The base URL for the Azure OpenAI API endpoint.
-        api_version (str): The version of the Azure OpenAI API to use.
-        """
-        super().__init__(model, api_key)  # 수정된 부분
-        self.client = openai.AzureOpenAI(azure_endpoint=api_base,
-                                         api_key=api_key,
-                                         api_version=api_version)
-        self.openai_chat_completion = self.client.chat.completions.create
-
-    def predict(self, api_request):
-        response = self._call_with_retry(
-            self.openai_chat_completion,
-            model=self.model,
-            temperature=api_request['temperature'],
-            messages=api_request['messages']
+    def __init__(self, model, api_key, api_version, api_base):
+        super().__init__(model, api_key)
+        self.client = openai.AzureOpenAI(
+            api_key=api_key,
+            api_version=api_version,
+            azure_endpoint=api_base
         )
-        response = self._parse_response(response)
-        return response
-
-
-class OpenaiModelAPI(AbstractModelAPIExecutor):
-    def __init__(self, model, api_key, base_url='https://api.openai.com/v1', use_eval=False):
-        """
-        Initialize the OpenaiModelAPI class.
-
-        Parameters:
-        model (str): The name of the model to use.
-        api_key (str): The API key for authenticating with OpenAI.
-        use_eval (bool): Whether the API is for evaluation.
-        """
-        super().__init__(model, api_key)  # 수정된 부분
-        self.client = openai.OpenAI(api_key=api_key, base_url=base_url)
         self.openai_chat_completion = self.client.chat.completions.create
-        if use_eval is True:
-            self.predict = self.predict_eval
-        else:
-            self.predict = self.predict_tool
 
     def models(self):
         return self.client.models.list()
-
-    def predict_tool(self, api_request):
-        tools = api_request['tools']
-        if tools and (self.model.startswith('gemini') or self.model.startswith('claude')):
-            tools = convert_tools_alphachat(tools)
-
-        response = self._call_with_retry(
-            self.openai_chat_completion,
-            model=self.model,
-            temperature=api_request['temperature'],
-            messages=api_request['messages'],
-            tools=tools
-        )
-        response_output = self._parse_response(response)
-        return response_output
-
-    def predict_eval(self, api_request):
-        response = None
-        while True:
-            try:
-                response = self.openai_chat_completion(
-                    model=self.model,
-                    temperature=api_request['temperature'],
-                    messages=api_request['messages']
-                )
-                response = response.model_dump()
-                break
-            except KeyError as e:
-                traceback.print_exc()
-                print(json.dumps(api_request['messages'], ensure_ascii=False))
-                sys.exit(1)
-            except Exception as e:
-                traceback.print_exc()
-                print(json.dumps(api_request['messages'], ensure_ascii=False))
-                raise e
-        return response
-
-
-class SolarModelAPI(AbstractModelAPIExecutor):
-    def __init__(self, model, api_key, base_url):
-        """
-        Initialize the SolarModelAPI class.
-
-        Parameters:
-        model (str): The name of the model to use.
-        api_key (str): The API key for authenticating with OpenAI.
-        base_url (str): The base URL for the Solar API endpoint.
-        """
-        super().__init__(model, api_key)
-        self.client = openai.OpenAI(base_url=base_url, api_key=api_key)
-        self.openai_chat_completion = self.client.chat.completions.create
 
     def predict(self, api_request):
         response = self._call_with_retry(
@@ -173,167 +142,95 @@ class SolarModelAPI(AbstractModelAPIExecutor):
         return response_output
 
 
-class MistralModelAPI(AbstractModelAPIExecutor):
-    def __init__(self, model, api_key):
+class OpenaiModelAPI(AbstractModelAPIExecutor):
+    def __init__(self, model, api_key, base_url=None):
         """
-        Initialize the MistralModelAPI class.
+        Initialize the OpenaiModelAPI class.
 
         Parameters:
         model (str): The name of the model to use.
-        api_key (str): The API key for authenticating with OpenAI.
+        api_key (str): The API key for authenticating with OpenAI API.
+        base_url (str, optional): The base URL for the API endpoint (for custom endpoints).
         """
         super().__init__(model, api_key)
-        self.client = MistralClient(api_key=api_key)
-        self.openai_chat_completion = self.client.chat
-
-    def remove_content_for_toolcalls(self, messages):
-        new_messages = []
-        for msg in messages:
-            if msg['role'] == 'assistant' and msg.get('content', None) and msg.get('tool_calls', None):
-                msg['content'] = ""
-            new_messages.append(msg)
-        return new_messages
-
-    def predict(self, api_request):
-        response = None
-        try_cnt = 0
-        while True:
-            try:
-                response = self.openai_chat_completion(
-                    model=self.model,
-                    temperature=api_request['temperature'],
-                    max_tokens=32768,
-                    messages=api_request['messages'],
-                    tools=api_request['tools']
-                )
-                response = response.model_dump()
-                break
-            except MistralAPIException as e:
-                msg = json.loads(str(e).split('Message:')[1]).get('message')
-                if msg == 'Assistant message must have either content or tool_calls, but not both.':
-                    api_request['messages'] = self.remove_content_for_toolcalls(api_request['messages'])
-                    print(f"[error] {msg}")
-                    print(json.dumps(api_request['messages'], ensure_ascii=False))
-                print(f".. retry api call .. {try_cnt} {msg} {msg == 'Assistant message must have either content or tool_calls, but not both.'}")
-                try_cnt += 1
-            except Exception as e:
-                traceback.print_exc()
-                print(json.dumps(api_request['messages'], ensure_ascii=False))
-                raise e
-        response_output = self._parse_response(response)
-        return response_output
-
-
-class InhouseModelAPI(AbstractModelAPIExecutor):
-    def __init__(self, model, api_key, base_url, served_model_name):
-        """
-        Initialize the MistralModelAPI class.
-
-        Parameters:
-        model (str): The name of the model to use.
-        api_key (str): The API key for authenticating with OpenAI.
-        base_url (str): The base URL for the Inhouse API endpoint.
-        served_model_name : This is the information that needs to be passed in the header when calling the model API.
-        """
-        super().__init__(model, api_key)
-        self.client = openai.OpenAI(base_url=base_url, api_key=api_key)
+        if base_url:
+            self.client = openai.OpenAI(base_url=base_url, api_key=api_key)
+        else:
+            self.client = openai.OpenAI(api_key=api_key)
         self.openai_chat_completion = self.client.chat.completions.create
-        self.served_model_name = served_model_name
 
     def models(self):
-        return self.client.models.list()
+        """OpenAI 모델 리스트 조회"""
+        try:
+            return self.client.models.list()
+        except Exception:
+            return []
 
     def predict(self, api_request):
+        messages = self._sanitize_messages(api_request['messages'])
         response = self._call_with_retry(
             self.openai_chat_completion,
-            model=self.served_model_name,
+            model=self.model,
             temperature=api_request['temperature'],
-            messages=api_request['messages'],
-            tools=api_request['tools'],
-            timeout=30  # 30초 타임아웃
+            messages=messages,
+            tools=api_request.get('tools')
         )
         response_output = self._parse_response(response)
         return response_output
 
 
-class Qwen2ModelAPI(AbstractModelAPIExecutor):
-    def __init__(self, model, api_key, base_url, served_model_name):
-        super().__init__(model, api_key)
-        if served_model_name is not None:
-            model = served_model_name
-        self.client = qwen_agent.llm.get_chat_model({
-            'model': served_model_name,
-            'model_server': base_url,
-            'api_key': api_key
-        })
-
-    def predict(self, api_request):
-        messages = api_request['messages']
-        tools = [tool['function'] for tool in api_request['tools']]
-        responses = []
-
-        for idx, msg in enumerate(messages):
-            if msg['role'] == 'tool':
-                messages[idx]['role'] = 'function'
-            if msg['role'] == 'assistant' and 'tool_calls' in msg:
-                messages[idx]['function_call'] = msg['tool_calls'][0]['function']
-        for responses in self.client.chat(messages=messages, functions=tools, stream=True):
-            continue
-        response = responses[0]
-        tools = None
-        if 'function_call' in response:
-            tools = [{'id': "qwen2-functioncall-random-id", 'function': response['function_call'], 'type': "function", 'index': None}]
-        return {
-            "content": response['content'],
-            "role": response['role'],
-            "function_call": None,
-            "tool_calls": tools,
-            "tool_call_id": None,
-            "name": None
-        }
-
-
-class GeminiModelAPI(AbstractModelAPIExecutor):
-    def __init__(self, model, gcloud_project_id, gcloud_location):
+class OpenRouterModelAPI(AbstractModelAPIExecutor):
+    def __init__(self, model, api_key, base_url):
         """
-        Initialize the GeminiModelAPI class.
+        Initialize the OpenRouterModelAPI class.
 
         Parameters:
-        model (str): The name of the model to use.
-        gcloud_project_id (str): The Google Cloud project ID, required for models hosted on Google Cloud.
-        gcloud_location (str): The location of the Google Cloud project, required for models hosted on Google Cloud.
+        model (str): The name of the model to use (e.g., meta-llama/llama-3.3-70b-instruct).
+        api_key (str): The API key for authenticating with OpenRouter.
+        base_url (str): The base URL for the OpenRouter API endpoint.
         """
-        super().__init__(model, None)
-        vertexai.init(project=gcloud_project_id, location=gcloud_location)
+        super().__init__(model, api_key)
+        self.client = openai.OpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            default_headers={
+                "HTTP-Referer": "https://github.com/mink555/mcp-llm-bm-v1",
+                "X-Title": "FunctionChat-Bench Evaluation"
+            }
+        )
+        self.openai_chat_completion = self.client.chat.completions.create
+
+    def models(self):
+        """OpenRouter 모델 리스트 조회"""
+        try:
+            return self.client.models.list()
+        except Exception:
+            # 모델 리스트 조회 실패 시 빈 리스트 반환
+            return []
+
+    def predict_tool(self, api_request):
+        # OpenRouter API 호출 전 1초 딜레이
+        time.sleep(1.0)
+        
+        tools = api_request.get('tools')
+        
+        # Mistral 모델인 경우 9자리 영숫자 ID로 normalize
+        is_mistral = 'mistral' in self.model.lower()
+        messages = self._sanitize_messages(api_request['messages'], for_mistral=is_mistral)
+        
+        response = self._call_with_retry(
+            self.openai_chat_completion,
+            model=self.model,
+            temperature=api_request['temperature'],
+            messages=messages,
+            tools=tools
+        )
+        response_output = self._parse_response(response)
+        return response_output
 
     def predict(self, api_request):
-        try_cnt = 0
-        response = None
-
-        gemini_temperature = api_request['temperature']
-        gemini_system_instruction, gemini_messages = convert_messages_gemini(api_request['messages'])
-        gemini_tools = convert_tools_gemini(api_request['tools'])
-
-        while True:
-            try:
-                response = call_gemini_model(
-                    gemini_model=self.model,
-                    gemini_temperature=gemini_temperature,
-                    gemini_system_instruction=gemini_system_instruction,
-                    gemini_tools=gemini_tools,
-                    gemini_messages=gemini_messages)
-                gemini_response = response['candidates'][0]
-                if "content" not in gemini_response and gemini_response["finish_reason"] == "SAFETY":
-                    response_output = {"role": "assistant", "content": None, "tool_calls": None}
-                else:
-                    response_output = convert_gemini_to_response(gemini_response["content"])
-            except Exception as e:
-                traceback.print_exc()
-                print(json.dumps(api_request['messages'], ensure_ascii=False))
-                raise e
-            else:
-                break
-        return response_output
+        """OpenRouter API를 통한 예측"""
+        return self.predict_tool(api_request)
 
 
 class APIExecutorFactory:
@@ -344,42 +241,33 @@ class APIExecutorFactory:
     @staticmethod
     def get_model_api(model_name, api_key=None, served_model_name=None, base_url=None, gcloud_project_id=None, gcloud_location=None):
         """
-        Creates and returns an API executor for a given model by identifying the type of model and initializing the appropriate API class.
+        Creates and returns an API executor for a given model.
 
         Parameters:
-            model_name (str): The name of the model to be used. It determines which API class is instantiated.
-            api_key (str, optional): The API key required for authentication with the model's API service.
-            served_model_name (str, optional): served model name.
-            base_url (str, optional): The base URL of the API service for the model.
-            gcloud_project_id (str, optional): The Google Cloud project ID, required for models hosted on Google Cloud.
-            gcloud_location (str, optional): The location of the Google Cloud project, required for models hosted on Google Cloud.
+            model_name (str): The name of the model to be used.
+            api_key (str, optional): The API key required for authentication.
+            served_model_name (str, optional): served model name (not used for OpenRouter).
+            base_url (str, optional): The base URL of the API service.
+            gcloud_project_id (str, optional): Not used (kept for compatibility).
+            gcloud_location (str, optional): Not used (kept for compatibility).
 
         Returns:
             An instance of an API executor for the specified model.
 
         Raises:
             ValueError: If the model name is not supported.
-
-        The method uses the model name to determine which API executor class to instantiate and returns an object of that class.
         """
-        if model_name == 'inhouse':  # In-house developed model
-            return InhouseModelAPI(model_name, api_key, base_url=base_url, served_model_name=served_model_name)
-        if model_name == 'inhouse-local':  # In-house developed model
-            return InhouseModelAPI(model_name, api_key, base_url=base_url, served_model_name=served_model_name)
-        elif model_name.lower().startswith('qwen2'):  # Upstage developed model
-            return Qwen2ModelAPI(model_name, api_key=api_key, base_url=base_url, served_model_name=served_model_name)
-        elif model_name.lower().startswith('solar'):  # Upstage developed model
-            return SolarModelAPI(model_name, api_key=api_key, base_url=base_url)
-        elif model_name.lower().startswith('gpt'):  # OpenAI developed model
-            return OpenaiModelAPI(model_name, api_key)
-        elif model_name.startswith('mistral'):  # Mistral developed model
-            return MistralModelAPI(model_name, api_key)
-        elif model_name.startswith('gemini'):  # Google developed model
-            if base_url.startswith('http://alpha-gateway'):
-                return OpenaiModelAPI(model_name, api_key, base_url)
-            else:
-                return GeminiModelAPI(model_name, gcloud_project_id=gcloud_project_id, gcloud_location=gcloud_location)
-        elif model_name.startswith('claude') and base_url.startswith('http://alpha-gateway'):
+        # OpenRouter API를 우선 확인 (base_url에 openrouter.ai가 포함된 경우)
+        if base_url and 'openrouter.ai' in base_url:
+            return OpenRouterModelAPI(model_name, api_key, base_url)
+        
+        # OpenAI 모델 (평가용 LLM-as-Judge)
+        if model_name.lower().startswith('gpt'):
             return OpenaiModelAPI(model_name, api_key, base_url)
-        else:
-            raise ValueError(f"Unsupported model name, {model_name}")
+        
+        # 기본적으로 OpenRouter 사용 (base_url이 제공된 경우)
+        if base_url:
+            return OpenRouterModelAPI(model_name, api_key, base_url)
+        
+        # 그 외의 경우 OpenAI로 시도 (평가용)
+        return OpenaiModelAPI(model_name, api_key)
