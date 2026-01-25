@@ -75,10 +75,10 @@ def update_openai_config(openai_api_key: str) -> str:
     config = {
         "api_type": "openai",
         "api_key": openai_api_key,
-        "api_version": "gpt-4o-2024-08-06",  # 최신 GPT-4 모델 사용
+        "api_version": "gpt-4.1",  # GPT-4.1 judge
         "temperature": 0.0,
-        "max_tokens": 4096,
-        "n": 3
+        "max_tokens": 256,
+        "n": 1
     }
     with open(config_path, 'w') as f:
         json.dump(config, f, indent=2)
@@ -106,7 +106,8 @@ def run_evaluation(eval_type, model, openrouter_api_key: str, base_url: str, too
         "--model", model,
         "--api_key", openrouter_api_key,
         "--base_url", base_url,
-        "--is_batch", "False"
+        "--is_batch", "False",
+        "--num-threads", "1"
     ]
     
     if eval_config["system_prompt_path"]:

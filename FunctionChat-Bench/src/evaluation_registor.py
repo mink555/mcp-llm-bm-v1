@@ -254,8 +254,10 @@ class DialogEvaluationRegistor(AbstractEvaluationRegistor):
             if type_of_output in self.eval_dic:
                 pass_cnt = len(self.eval_dic[type_of_output].get(PASS_STR, []))
                 case_tot_cnt = pass_cnt + len(self.eval_dic[type_of_output].get(FAIL_STR, []))
-                print(f"  {type_of_output} : {pass_cnt/case_tot_cnt:.2f}")
-        print(f" avg(micro) : {tot_pass_cnt/self.max_size}")
+                rate = (pass_cnt / case_tot_cnt) if case_tot_cnt else 0.0
+                print(f"  {type_of_output} : {rate:.2f}")
+        micro = (tot_pass_cnt / self.max_size) if self.max_size else 0.0
+        print(f" avg(micro) : {micro}")
 
     def get_score(self):
         if len(self.eval_dic) == 0:
@@ -269,10 +271,10 @@ class DialogEvaluationRegistor(AbstractEvaluationRegistor):
                 tot_pass_cnt += pass_cnt
                 case_tot_cnt = pass_cnt + len(self.eval_dic[type_of_output].get(FAIL_STR, []))
                 score_dict[f'{type_of_output} pass cnt'] = pass_cnt
-                score_dict[f'{type_of_output} pass rate'] = pass_cnt/case_tot_cnt
+                score_dict[f'{type_of_output} pass rate'] = (pass_cnt / case_tot_cnt) if case_tot_cnt else 0.0
         score_dict['total_pass_cnt'] = tot_pass_cnt
         score_dict['total_cnt'] = self.max_size
-        score_dict['avg(micro)'] = tot_pass_cnt/self.max_size
+        score_dict['avg(micro)'] = (tot_pass_cnt / self.max_size) if self.max_size else 0.0
         return score_dict    
 
 

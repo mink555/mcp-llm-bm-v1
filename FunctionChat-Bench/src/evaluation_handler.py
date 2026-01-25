@@ -65,9 +65,11 @@ class EvaluationHandler:
         self.rubric_prompts = self.get_rubric_prompts()
         cfg = json.loads(open(f'{REPO_PATH}/config/openai.cfg', 'r').read())
         self.temperature = float(cfg.get('temperature'))
-        self.executor = self.load_api_executor(cfg)
+        self.n = int(cfg.get('n', 1) or 1)
         self.openai_model = cfg['api_version']
-        self.openai_apikey = cfg['api_key']
+        # api_key는 placeholder(${ENV})일 수 있으므로 먼저 resolve 후 executor에 주입
+        self.openai_apikey = self._resolve_api_key(cfg.get('api_key'))
+        self.executor = self.load_api_executor(cfg, api_key=self.openai_apikey)
         self.max_tokens = cfg['max_tokens']
         self.eval_reg = EVAlUATION_REGISTOR_OBJ[self.evaluation_type]()
         # 새로운 디렉토리 구조: score/ 사용
@@ -90,26 +92,40 @@ class EvaluationHandler:
                     logging.warning(f"Error reading {rubric_file_path}: {e}")
         return rubric_prompts
 
-    def load_api_executor(self, cfg: dict):
+    def load_api_executor(self, cfg: dict, api_key: Optional[str] = None):
         # 지연 import (SIGSEGV 방지)
         from src.api_executor import OpenaiModelAzureAPI, OpenaiModelAPI
         
         api_type = cfg.get('api_type', None)
+        resolved_key = api_key if api_key is not None else self._resolve_api_key(cfg.get('api_key'))
         
         if api_type == "azure":
             return OpenaiModelAzureAPI(
                 model=cfg.get('api_version', cfg.get('instance')),
-                api_key=cfg.get('api_key'),
+                api_key=resolved_key,
                 api_base=cfg.get('api_base'),
                 api_version=cfg.get('api_version')
             )
         elif api_type == "openai":
+            base_url = cfg.get('api_base') or cfg.get('base_url')
             return OpenaiModelAPI(
                 model=cfg.get('api_version'),
-                api_key=cfg.get('api_key')
+                api_key=resolved_key,
+                base_url=base_url
             )
         else:
             raise ValueError(f"Unsupported evaluation API type: {api_type}")
+
+    def _resolve_api_key(self, api_key: Optional[str]) -> str:
+        """
+        config 값에 실키를 넣지 않도록, `${OPENAI_API_KEY}` 같은 placeholder를 지원합니다.
+        """
+        if not api_key:
+            return os.getenv("OPENAI_API_KEY", "")
+        if isinstance(api_key, str) and api_key.startswith("${") and api_key.endswith("}"):
+            env_name = api_key[2:-1].strip()
+            return os.getenv(env_name, "")
+        return api_key
 
     def clean_tool_calls(self, tools: list) -> Optional[list]:
         if not tools:
@@ -321,7 +337,12 @@ class EvaluationHandler:
     def fetch(self, inp, out, debug=False):
         input_prompt = self.get_input_prompt(inp, out)
         messages = [{'role': 'user', 'content': input_prompt}]
-        evaluate_response = self.executor.predict({'temperature': self.temperature, 'messages': messages})
+        evaluate_response = self.executor.predict({
+            'temperature': self.temperature,
+            'messages': messages,
+            'n': self.n,
+            'max_tokens': self.max_tokens,
+        })
         if debug is True:
             print(f"\nserial_num : {inp['serial_num']}")
             print(f'evaluate_request : {input_prompt}')
@@ -399,7 +420,13 @@ class EvaluationHandler:
                     custom_id = f"{self.evaluation_type}_{idx}"
                     input_prompt = self.get_input_prompt(inp, out)
                     messages = [{'role': 'user', 'content': input_prompt}]
-                    reformed_json = openai_utils.get_openai_batch_format(custom_id, self.openai_model, messages, self.max_tokens)
+                    reformed_json = openai_utils.get_openai_batch_format(
+                        custom_id,
+                        self.openai_model,
+                        messages,
+                        self.max_tokens,
+                        n=self.n,
+                    )
                     input_prompts.append(input_prompt)
                     fp.write(json.dumps(reformed_json, ensure_ascii=False)+'\n')
         return input_prompts
@@ -553,10 +580,76 @@ class EvaluationHandler:
         if sample:
             # TODO : sample 1개만 실행하고 파일에 저장하게 작업 추가
             return
-        outputs = self._process_exact_match(input_set, output_set, eval_output_length)
-        if not only_exact:
-            outputs = self._process_rubric_evaluation(outputs, is_batch)
-        self._finalize_evaluation(eval_file_path, eval_log_file_path, outputs, model_name, llm_judge_name, model_path, eval_subtype)
+
+        # 비배치 모드에서 429 등으로 중간 실패해도 재개(resume) 가능하도록
+        # 결과를 1개씩 즉시 파일에 append 합니다.
+        if not is_batch:
+            write_option = 'a' if (not reset and os.path.isfile(eval_file_path)) else 'w'
+            eval_raw_fw = open(eval_file_path, write_option)
+            eval_tsv_fw = open(eval_log_file_path, write_option)
+            wrote_header = os.path.isfile(eval_log_file_path) and write_option == 'a'
+
+            try:
+                for idx in tqdm(range(eval_output_length, len(input_set)), desc="Processing eval (stream)"):
+                    inp = input_set[idx]
+                    out = output_set[idx]
+                    if out is None:
+                        out = {'tool_calls': []}
+                    # singlecall은 CALL 평가로 통일
+                    inp['type_of_output'] = 'call' if self.evaluation_type == SINGLECALL else inp.get('type_of_output')
+
+                    is_pass_bool, evaluate_response, input_prompt = self.exact_match(inp, out)
+
+                    # exact match 통과 or only_exact면 judge 호출 없이 기록
+                    if only_exact or is_pass_bool:
+                        response_formatter = RESPONSE_FORMATTER_OBJ[self.evaluation_type](
+                            request_model=inp,
+                            response_model=out,
+                            evaluate_prompt=input_prompt,
+                            evaluate_response=evaluate_response
+                        )
+                    else:
+                        # rubric judge
+                        try:
+                            evaluate_response, input_prompt = self.fetch(inp, out, debug=debug)
+                        except Exception as e:
+                            # judge API가 402/429 등으로 막혀도 전체 평가/엑셀 생성이 가능하도록 스킵 처리
+                            logging.error(f"Judge call failed at idx={idx} (skip): {type(e).__name__}: {str(e)[:200]}")
+                            evaluate_response = self._default_evaluate_response(
+                                message=f"skip evaluation (judge_error: {type(e).__name__})",
+                                exact="fail",
+                            )
+                        response_formatter = RESPONSE_FORMATTER_OBJ[self.evaluation_type](
+                            request_model=inp,
+                            response_model=out,
+                            evaluate_prompt=input_prompt,
+                            evaluate_response=evaluate_response
+                        )
+                        is_pass_bool = True
+
+                    # header는 첫 줄에만
+                    if not wrote_header:
+                        eval_tsv_fw.write(f"{response_formatter.get_tsv_title()}\n")
+                        wrote_header = True
+
+                    # register + append
+                    self.eval_reg.add_eval_output(response_formatter.to_dict())
+                    eval_raw_fw.write(f"{json.dumps(response_formatter.to_dict(), ensure_ascii=False)}\n")
+                    eval_tsv_fw.write(f"{response_formatter.to_tsv().strip()}\n")
+                    eval_raw_fw.flush()
+                    eval_tsv_fw.flush()
+            finally:
+                eval_raw_fw.close()
+                eval_tsv_fw.close()
+
+            # 완료 후 표시/점수 저장
+            self.eval_reg.display()
+            self._save_evaluation_result(model_name, llm_judge_name, model_path, eval_subtype)
+        else:
+            outputs = self._process_exact_match(input_set, output_set, eval_output_length)
+            if not only_exact:
+                outputs = self._process_rubric_evaluation(outputs, is_batch)
+            self._finalize_evaluation(eval_file_path, eval_log_file_path, outputs, model_name, llm_judge_name, model_path, eval_subtype)
         elapsed_time = time.time() - start_time
         print(f"Total time execution: {elapsed_time:.2f} seconds")
         return

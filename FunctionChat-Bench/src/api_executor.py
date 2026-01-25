@@ -68,7 +68,8 @@ class AbstractModelAPIExecutor:
         return sanitized
 
     def _call_with_retry(self, func, *args, **kwargs):
-        max_retries = kwargs.pop('max_retries', 3)
+        # 기본 재시도 횟수를 늘려 429(분당 제한 등)에 더 강인하게 대응
+        max_retries = kwargs.pop('max_retries', 8)
         for attempt in range(max_retries):
             try:
                 response = func(*args, **kwargs)
@@ -77,8 +78,17 @@ class AbstractModelAPIExecutor:
             except Exception as e:
                 error_msg = str(e)
                 error_type = type(e).__name__
+                # 크레딧 부족(402) / 인증(401) 등은 재시도해도 해결 안 됨 → 즉시 실패
+                status_code = getattr(e, "status_code", None)
+                if status_code in (401, 402, 403):
+                    logger.error(f"API call failed (non-retriable {status_code}) ({error_type}): {error_msg[:300]}")
+                    raise e
                 if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
+                    # 429 등 일시적 제한에 대비: 4s/8s/16s... 지수 백오프
+                    base_delay = 4
+                    wait_time = base_delay * (2 ** attempt)
+                    # 과도한 대기 방지 (상한 60초)
+                    wait_time = min(wait_time, 60)
                     logger.warning(f"API call failed ({error_type}): {error_msg[:200]}")
                     logger.warning(f"Retrying in {wait_time} seconds... (attempt {attempt + 1}/{max_retries})")
                     time.sleep(wait_time)
@@ -131,13 +141,16 @@ class OpenaiModelAzureAPI(AbstractModelAPIExecutor):
         return self.client.models.list()
 
     def predict(self, api_request):
-        response = self._call_with_retry(
-            self.openai_chat_completion,
-            model=self.model,
-            temperature=api_request['temperature'],
-            messages=api_request['messages'],
-            tools=api_request['tools']
-        )
+        kwargs = {
+            "model": self.model,
+            "temperature": api_request["temperature"],
+            "messages": api_request["messages"],
+            "tools": api_request.get("tools"),
+            "n": int(api_request.get("n", 1) or 1),
+        }
+        if api_request.get("max_tokens") is not None:
+            kwargs["max_tokens"] = int(api_request["max_tokens"])
+        response = self._call_with_retry(self.openai_chat_completion, **kwargs)
         response_output = self._parse_response(response)
         return response_output
 
@@ -168,13 +181,16 @@ class OpenaiModelAPI(AbstractModelAPIExecutor):
 
     def predict(self, api_request):
         messages = self._sanitize_messages(api_request['messages'])
-        response = self._call_with_retry(
-            self.openai_chat_completion,
-            model=self.model,
-            temperature=api_request['temperature'],
-            messages=messages,
-            tools=api_request.get('tools')
-        )
+        kwargs = {
+            "model": self.model,
+            "temperature": api_request["temperature"],
+            "messages": messages,
+            "tools": api_request.get("tools"),
+            "n": int(api_request.get("n", 1) or 1),
+        }
+        if api_request.get("max_tokens") is not None:
+            kwargs["max_tokens"] = int(api_request["max_tokens"])
+        response = self._call_with_retry(self.openai_chat_completion, **kwargs)
         response_output = self._parse_response(response)
         return response_output
 

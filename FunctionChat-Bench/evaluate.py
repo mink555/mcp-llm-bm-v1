@@ -34,6 +34,13 @@ from src.constants import DEFAULT_TEMPERATURE, LOCALHOST_BASE_URL, EXIT_SUCCESS,
 
 REPO_PATH = os.path.dirname(os.path.abspath(__file__))
 
+# .env 로드 (judge OPENAI_API_KEY 등)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
 
 # program options
 @click.group()
@@ -53,6 +60,8 @@ def default_eval_options(f):
     f = click.option('--debug', prompt='debug flag', help='debugging', cls=DefaultDebugPromptOptions)(f)
     f = click.option('--only_exact', prompt='evaluate exact match', help='only exact match(True, False)', cls=DefaultOnlyExactPromptOptions)(f)
     f = click.option('--is_batch', prompt='batch processing', help='batch processing(True, False)', cls=DefaultBatchPromptOptions)(f)
+    f = click.option('--num-threads', 'num_threads', default=1, show_default=True,
+                     help='동시 API 호출 스레드 수 (rate limit 회피용)')(f)
     # openai type
     f = click.option('--api_key', prompt='model api key', help='api key', cls=DefaultApiKeyPromptOptions)(f)
     f = click.option('--temperature', prompt='temperature', help='generate temperature', default=DEFAULT_TEMPERATURE)(f)
@@ -155,6 +164,7 @@ def run_evaluate(
         system_prompt_path=None, # common일때 불필요
         tools_type=None, # singlecall 일때만 필요
         is_batch=True, # batch processing 옵션
+        num_threads=1,
     ):
     eval_subtype = get_eval_subtype(eval_type, input_path)
     model_name = None
@@ -198,7 +208,7 @@ def run_evaluate(
             model, api_key, base_url, model_name,
             gcloud_project_id, gcloud_location
         ).fetch_and_save(
-            api_request_list, file_paths['predict'], reset, sample, debug
+            api_request_list, file_paths['predict'], reset, sample, debug, max_threads=int(num_threads)
         )
         if process_meta is not None:
             local_inference.kill_vllm(process_meta)
@@ -244,7 +254,7 @@ def dialog(model,
            model_path, tool_parser, serving_wait_timeout,
            reset, sample, debug, only_exact,
            gcloud_project_id, gcloud_location,
-           is_batch):
+           is_batch, num_threads):
     eval_type = inspect.stack()[0][3]
     run_evaluate(
       eval_type, f'FunctionChat-{eval_type.capitalize()}',
@@ -256,7 +266,8 @@ def dialog(model,
       reset, sample, debug, only_exact,
       gcloud_project_id, gcloud_location,
       system_prompt_path=system_prompt_path,
-      is_batch=is_batch
+      is_batch=is_batch,
+      num_threads=num_threads,
     )
 
 
@@ -272,7 +283,7 @@ def singlecall(model, input_path, system_prompt_path,
                reset, sample, debug, only_exact,
                gcloud_project_id, gcloud_location,
                tools_type,
-               is_batch):
+               is_batch, num_threads):
     eval_type = inspect.stack()[0][3]
     run_evaluate(
       eval_type, f'FunctionChat-{eval_type.capitalize()}',
@@ -285,7 +296,8 @@ def singlecall(model, input_path, system_prompt_path,
       gcloud_project_id, gcloud_location,
       system_prompt_path=system_prompt_path,
       tools_type=tools_type,
-      is_batch=is_batch
+      is_batch=is_batch,
+      num_threads=num_threads,
     )
 
 @cli.command()
@@ -301,7 +313,7 @@ def common(model, input_path,
            reset, sample, debug, only_exact,
            # gemini option
            gcloud_project_id, gcloud_location,
-           is_batch):
+           is_batch, num_threads):
 
     eval_type = inspect.stack()[0][3]
     run_evaluate(
@@ -313,7 +325,8 @@ def common(model, input_path,
       model_path, tool_parser, serving_wait_timeout,
       reset, sample, debug, only_exact,
       gcloud_project_id, gcloud_location,
-      is_batch=is_batch
+      is_batch=is_batch,
+      num_threads=num_threads,
     )
 
 
