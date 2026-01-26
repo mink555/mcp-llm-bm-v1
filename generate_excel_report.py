@@ -261,7 +261,7 @@ def collect_model_data(model_name):
                         "category": "CallDecision",
                         "is_pass": is_pass,
                         "id": row.get('#serial_num', ''),
-                        "query": extract_query(row.get('query', '')),
+                        "query": extract_query(row.get('input_messages', '')),  # CallDecision uses input_messages
                         "gt": extract_content(row.get('ground_truth', '')),
                         "output": extract_content(row.get('model_output', '')),
                         "error": err
