@@ -5,6 +5,8 @@ score/
 
 # 실행 산출물/로그
 eval_log*.txt
+rerun_skipped.log
+rerun_skipped.sh
 
 # 환경 변수
 .env
