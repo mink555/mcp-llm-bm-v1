@@ -16,6 +16,7 @@
 | [데이터셋 구성](#데이터셋-구성) | 싱글턴/멀티턴 데이터셋 상세 구조 |
 | [평가 프로세스](#평가-프로세스) | LLM-as-Judge 채점 흐름 및 기준 |
 | [결과 분석](#결과-분석) | 1,306건 전체 채점 최종 결과 요약 |
+| [핵심 코드 파일](#핵심-코드-파일) | 주요 스크립트 역할 및 실행 방법 |
 | [사용 가이드](#사용-가이드) | 설치, 설정, 실행 단계별 안내 |
 | [해결한 이슈 및 FAQ](#해결한-이슈-및-faq) | 트러블슈팅 및 자주 묻는 질문 |
 
@@ -123,6 +124,65 @@ Turn 3 (Completion 평가)
 | **3** | **Qwen3-14B** | 42.0% | 80.6% | 30.7% | **51.5%** |
 | **4** | **Llama-3.3-70B** | **48.0%** | 41.6% | 10.7% | **28.3%** |
 | **5** | **Mistral-Small-24B** | 47.0% | 16.0% | 31.7% | **28.0%** |
+
+---
+
+## 핵심 코드 파일
+
+### 프로젝트 구조
+```
+KAKAO-FunctionChat-Bench/
+├── run_evaluation.py          # [1] 전체 평가 자동화 스크립트
+├── quick_test.py              # [2] 빠른 검증용 테스트 스크립트
+├── generate_excel_report.py   # [3] Excel 리포트 생성기
+├── .env                       # API 키 설정 (git 제외)
+│
+└── FunctionChat-Bench/
+    ├── evaluate.py            # [4] 벤치마크 엔진 (CLI 엔트리)
+    ├── config/
+    │   └── openai.cfg         # [5] Judge 모델 설정
+    └── src/
+        ├── api_executor.py        # [6] API 호출 및 재시도 로직
+        └── evaluation_handler.py  # [7] LLM-as-Judge 채점 로직
+```
+
+### 핵심 파일 상세 설명
+| 번호 | 파일명 | 역할 | 실행 방법 |
+|:---:|:---|:---|:---|
+| **1** | `run_evaluation.py` | 5개 모델 전체 평가 + 리포트 생성 자동화 | `python run_evaluation.py` |
+| **2** | `quick_test.py` | 카테고리별 샘플링 후 빠른 검증 | `python quick_test.py --sample-size 2` |
+| **3** | `generate_excel_report.py` | TSV 결과를 Excel 리포트로 변환 | `python generate_excel_report.py` |
+| **4** | `evaluate.py` | 개별 데이터셋 평가 (Dialog/SingleCall/Common) | 아래 상세 명령어 참조 |
+| **5** | `openai.cfg` | Judge 모델 및 API 엔드포인트 설정 | 직접 편집 |
+| **6** | `api_executor.py` | OpenRouter API 연동 + 지수 백오프 재시도 | 내부 모듈 (직접 실행 X) |
+| **7** | `evaluation_handler.py` | GPT-4.1 Judge 호출 + 실시간 결과 저장 | 내부 모듈 (직접 실행 X) |
+
+### evaluate.py 개별 실행 명령어
+```bash
+# Dialog (멀티턴) 평가
+python evaluate.py dialog \
+  --input_path data/FunctionChat-Dialog.jsonl \
+  --system_prompt_path data/system_prompt.txt \
+  --model "qwen/qwen3-32b" \
+  --api_key $OPENROUTER_API_KEY \
+  --base_url "https://openrouter.ai/api/v1"
+
+# SingleCall (싱글턴) 평가
+python evaluate.py singlecall \
+  --input_path data/FunctionChat-Singlecall.jsonl \
+  --system_prompt_path data/system_prompt.txt \
+  --tools_type all \
+  --model "qwen/qwen3-32b" \
+  --api_key $OPENROUTER_API_KEY \
+  --base_url "https://openrouter.ai/api/v1"
+
+# CallDecision (호출 판단) 평가
+python evaluate.py common \
+  --input_path data/FunctionChat-CallDecision.jsonl \
+  --model "qwen/qwen3-32b" \
+  --api_key $OPENROUTER_API_KEY \
+  --base_url "https://openrouter.ai/api/v1"
+```
 
 ---
 
