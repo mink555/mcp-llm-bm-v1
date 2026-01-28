@@ -1,4 +1,4 @@
-# FunctionChat-Bench OpenRouter 평가 프로젝트
+# KAKAO-FunctionChat-Bench (OpenRouter)
 
 > OpenRouter API를 통해 여러 LLM 모델의 **Tool-Use(Function Calling) 능력**을 평가하고, 전문적인 Excel 리포트를 자동 생성하는 프로젝트입니다.
 
